@@ -1,0 +1,38 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+psycopg://wakeup:wakeup@db:5432/wakeup
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      MOCK_EMAIL: ${MOCK_EMAIL:-true}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      EMAIL_FROM: ${EMAIL_FROM:-agent@example.com}
+      EMAIL_REPLY_DOMAIN: ${EMAIL_REPLY_DOMAIN:-example.com}
+      ENVIRONMENT: development
+      CALENDAR_MODE: stub
+      STUB_AVAILABLE_SLOTS_ISO: "2026-05-12T14:00:00+00:00,2026-05-13T16:30:00+00:00,2026-05-14T10:00:00+00:00"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: wakeup
+      POSTGRES_PASSWORD: wakeup
+      POSTGRES_DB: wakeup
+    ports:
+      - "5433:5432"
+    volumes:
+      - wakeup_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wakeup -d wakeup"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  wakeup_pg:
