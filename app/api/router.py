@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, Header, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.agent.orchestrator import EmailAgentOrchestrator
@@ -20,6 +20,10 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def get_settings_dep() -> Settings:
+    return get_settings()
+
+
 class HealthResponse(BaseModel):
     ok: bool = True
 
@@ -29,12 +33,100 @@ def healthz() -> HealthResponse:
     return HealthResponse()
 
 
+class CalendarDisclosure(BaseModel):
+    """Satisfies assignment: explicitly mark stub vs real calendar integration."""
+
+    mode: Literal["stub", "noop"] = Field(
+        description=(
+            "`stub` = deterministic slot picker from STUB_AVAILABLE_SLOTS_ISO only "
+            "(not Google Calendar / Cal.com). "
+            "`noop` = booking side effects disabled (testing)."
+        ),
+    )
+    disclosure: str = Field(
+        description="Human-readable statement for demos and reviewers.",
+    )
+    authoritative_slot_list_iso: list[str] = Field(
+        description="Exact RFC3339 strings the orchestrator will accept for confirm_booking (stub mode).",
+    )
+
+
+class IntegrationMetaResponse(BaseModel):
+    booking: CalendarDisclosure
+    recent_persisted_bookings: str = Field(
+        default="/v1/meta/recent-bookings",
+        description="Use this path for stored booking_history rows (confirmed/cancelled/proposed), newest first.",
+    )
+
+
+@router.get(
+    "/v1/meta/integration",
+    response_model=IntegrationMetaResponse,
+    summary="Booking / calendar integration (stub vs production)",
+)
+def integration_meta(settings: Settings = Depends(get_settings_dep)) -> IntegrationMetaResponse:
+    """Use this in Loom/README to show which calendar backend ships (Scrini PDF requirement)."""
+
+    stub_slots = settings.stub_slot_list()
+    mode = settings.calendar_mode
+    if mode == "stub":
+        text = (
+            "Booking is implemented as a **stub**: slots are enumerated in env `STUB_AVAILABLE_SLOTS_ISO` "
+            "and validated in `StubCalendar` / `EmailAgentOrchestrator._apply_booking_stub`. "
+            "There is no Google Calendar OAuth, Cal.com API, or real ICS conflict checking in this build."
+        )
+    else:
+        text = (
+            "Calendar mode is `noop`: confirmations are not written to `StubCalendar` logs "
+            "(orchestrator still expects stub slot strings if the planner emits confirm_booking)."
+        )
+    return IntegrationMetaResponse(
+        booking=CalendarDisclosure(mode=mode, disclosure=text, authoritative_slot_list_iso=list(stub_slots)),
+    )
+
+
+class BookingLedgerItem(BaseModel):
+    conversation_id: str
+    prospect_email: str
+    subject: str
+    preset_key: str
+    conversation_phase: str
+    slot_iso: str
+    booking_status: str
+    marked_at: str
+    conversation_updated_at: str
+
+
+class RecentBookingsResponse(BaseModel):
+    bookings: list[BookingLedgerItem]
+    note: str = (
+        "Entries come from persisted `state_json.booking_history` (stub calendar). "
+        "Sorted by `marked_at` descending — not the slot whitelist from `/v1/meta/integration`."
+    )
+
+
+@router.get(
+    "/v1/meta/recent-bookings",
+    response_model=RecentBookingsResponse,
+    summary="Recent persisted booking events (stub calendar)",
+)
+def recent_stub_bookings(
+    limit: int = Query(default=50, ge=1, le=500),
+    session: Session = Depends(db_session_dependency),
+) -> RecentBookingsResponse:
+    """Lists actual booking records stored on threads (confirmed / cancelled / proposed), newest first."""
+
+    repo = ConversationRepository(session)
+    raw = repo.booking_ledger_events_recent(limit=limit)
+    return RecentBookingsResponse(bookings=[BookingLedgerItem.model_validate(r) for r in raw])
+
+
 class OutreachResponse(BaseModel):
     conversation_id: str
-
-
-def get_settings_dep() -> Settings:
-    return get_settings()
+    provider_message_id: str | None = Field(
+        default=None,
+        description="Resend email id after send; verify delivery under Emails → Logs in dashboard.",
+    )
 
 
 @router.post("/v1/agent/outreach", response_model=OutreachResponse)
@@ -60,7 +152,7 @@ def start_outreach(
         subject_hint=payload.subject_hint,
     )
     _ = _outreach
-    return OutreachResponse(conversation_id=conv.id)
+    return OutreachResponse(conversation_id=conv.id, provider_message_id=receipt.provider_message_id)
 
 
 class ConversationEnvelope(BaseModel):

@@ -62,20 +62,27 @@ Key env vars:
 - `WEBHOOK_SECRET` — optional `X-Webhook-Secret` expectation for webhook hardening demos.
 - `ANTHROPIC_MODEL` — defaults to `claude-sonnet-4-6`; set `claude-opus-4-6` (or another id from `/v1/models`) if you prefer.
 
-### Local development
+### Local development (recommended)
+
+Run **Postgres in Docker**, **FastAPI on your machine** (simplest for debugging and Resend/ngrok):
 
 ```bash
 cd /path/to/this-repo  # repository root (e.g. scr-practice)
 python -m venv .venv && source .venv/bin/activate  # Windows: .venv\\Scripts\\activate
 pip install -e ".[dev]"
 cp .env.example .env
+# Edit .env: ANTHROPIC_API_KEY, RESEND_API_KEY, DATABASE_URL → postgresql+psycopg://wakeup:wakeup@127.0.0.1:5433/wakeup
 
-export ANTHROPIC_API_KEY=sk-ant-api03-...
-export RESEND_API_KEY=re_...
+docker compose up -d   # starts **db** only (default)
+# If host port 5433 is busy:  WAKEUP_POSTGRES_PORT=5434 docker compose up -d
+# …and set DATABASE_URL to use that port on 127.0.0.1
+
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 Use **http://localhost:8000/docs** (OpenAPI) for interactive requests against the same API your ngrok tunnel exposes.
+
+**Scrini PDF — “clearly mark” booking**: open **`GET /v1/meta/integration`** for an explicit **`stub`** vs real-calendar statement plus the allowed slot whitelist (`STUB_AVAILABLE_SLOTS_ISO`). **Persisted bookings** from actual threads (what the stub wrote into `booking_history`) are listed newest-first via **`GET /v1/meta/recent-bookings?limit=50`** — different from integration, which is only configuration.
 
 Smoke tests:
 
@@ -83,21 +90,28 @@ Smoke tests:
 pytest
 ```
 
-Docker (Postgres + API):
-
-```bash
-export ANTHROPIC_API_KEY=sk-ant-api03-...
-docker compose up --build
-```
-
 Postgres uses a compose-scoped Docker volume (`scr_practice_wakeup_pg`). For a **fresh empty database**:
 
 ```bash
 docker compose down -v
-docker compose up --build
+docker compose up -d
 ```
 
-With Docker Compose, the API **`env_file`** loads `.env`; set **`RESEND_API_KEY`** there for real sends. Restart containers after editing `.env`.
+**Use the DB from your terminal** (Compose publishes Postgres on **127.0.0.1** only; default port **5433**, or `WAKEUP_POSTGRES_PORT`):
+
+```bash
+# psql (install Postgres client, or: docker run --rm -it postgres:16-alpine psql "...")
+psql "postgresql://wakeup:wakeup@127.0.0.1:5433/wakeup"
+
+# Same URL works in TablePlus, DBeaver, etc.
+# Helper (from repo root):  WAKEUP_POSTGRES_PORT=5434 ./scripts/psql-wakeup.sh
+```
+
+Optional: run the **API inside Docker** as well (not the default):
+
+```bash
+docker compose --profile docker-api up --build -d
+```
 
 ### Demo script (manual)
 

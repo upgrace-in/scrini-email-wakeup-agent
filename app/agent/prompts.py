@@ -10,6 +10,10 @@ Rules:
 - Distinguish early scheduling discussion from cancelling a nailed-down time.
 - In quoted_rates_usd_hour, capture every explicit hourly USD figure the prospect gives, including unconventional
   formatting: "$125", "125$", "125/hr", "125 USD/hr". Use plain floats (strip currency symbols).
+- If CURRENT_CONVERSATION_PHASE or memory shows the agent already closed as declined/no-fit/budget walk-away, but the
+  LATEST prospect message sincerely apologizes, asks to reschedule, wants to revisit, or is open to continuing,
+  classify that intent accordingly (typically interested, scheduling, or rescheduling_request) — not declining —
+  unless they still firmly refuse.
 
 Do not propose replies. Do not be verbose in rationale.
 """

@@ -64,4 +64,5 @@ def send_outbound(*, settings: Settings, to_email: str, subject: str, body: str)
         raise RuntimeError("Resend send failed") from exc
 
     mid = getattr(r, "id", None)
+    log.info("resend outbound accepted | to=%s subject=%s provider_message_id=%s", to_email, subject, mid)
     return SentEmailReceipt(provider_message_id=mid, http_status=200)

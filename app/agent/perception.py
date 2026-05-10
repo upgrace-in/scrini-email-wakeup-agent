@@ -21,6 +21,7 @@ MEMORY_STATE_JSON:
 {state.model_dump_json(indent=2)}
 
 CURRENT_CONVERSATION_PHASE: {state.phase}
+(If phase is closed_declined or closed_no_fit, prioritize whether the NEWEST prospect message is re-engaging.)
 
 THREAD_TRANSCRIPT (oldest→newest):
 {transcript}

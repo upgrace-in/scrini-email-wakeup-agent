@@ -39,7 +39,9 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
         description=(
             "Autonomous outreach + negotiation + scheduling agent with persisted thread memory "
-            "and reschedule loops."
+            "and reschedule loops. "
+            "Booking uses a **stub calendar** (enumerated ISO slots) unless you swap `app/calendar/` — "
+            "see `GET /v1/meta/integration` (allowed slots) and `GET /v1/meta/recent-bookings` (persisted rows)."
         ),
     )
     application.include_router(public_router)

@@ -25,6 +25,24 @@ CLOSED = (
     ConversationPhase.CLOSED_SUCCESS,
 )
 
+# Threads we may reopen when the prospect clearly changes their mind (not CLOSED_SUCCESS by default).
+_REOPENABLE_CLOSED = frozenset(
+    {ConversationPhase.CLOSED_DECLINED, ConversationPhase.CLOSED_NO_FIT},
+)
+
+
+def _prospect_reopens_closed_thread(per: PerceptionResult) -> bool:
+    """Prospect mails again after we closed DECLINED / NO_FIT — allow a sane second chance."""
+    if per.is_hard_decline or per.intent == ProspectIntent.DECLINING:
+        return False
+    return per.intent in (
+        ProspectIntent.INTERESTED,
+        ProspectIntent.CURIOUS,
+        ProspectIntent.OBJECTING,
+        ProspectIntent.SCHEDULING,
+        ProspectIntent.RESCHEDULING_REQUEST,
+    )
+
 
 def derive_phase_after_turn(state: ConversationState) -> ConversationPhase:
     """Single place for coarse phase derivation after persisted effects."""
@@ -130,8 +148,11 @@ class EmailAgentOrchestrator:
         gig = GigConfig.model_validate(conv.gig_snapshot_json)
         state = self._repo.load_state(conv)
 
-        if state.phase in CLOSED:
-            log.info("skip_closed conversation_id=%s phase=%s", conversation_id, state.phase)
+        transcript = transcript_for_prompt(messages)
+        reopened_after_close = False
+
+        if state.phase == ConversationPhase.CLOSED_SUCCESS:
+            log.info("skip_closed_success conversation_id=%s", conversation_id)
             return AgentRunReceipt(
                 conversation_id=conversation_id,
                 outbound_sent=None,
@@ -140,8 +161,33 @@ class EmailAgentOrchestrator:
                 perception=None,
             )
 
-        transcript = transcript_for_prompt(messages)
-        perception = run_perception(settings=self._settings, transcript=transcript, state=state, gig=gig)
+        if state.phase in _REOPENABLE_CLOSED:
+            perception = run_perception(settings=self._settings, transcript=transcript, state=state, gig=gig)
+            if not _prospect_reopens_closed_thread(perception):
+                log.info(
+                    "skip_still_closed conversation_id=%s phase=%s perception=%s",
+                    conversation_id,
+                    state.phase,
+                    perception.intent,
+                )
+                return AgentRunReceipt(
+                    conversation_id=conversation_id,
+                    outbound_sent=None,
+                    phase_after=state.phase,
+                    planner=None,
+                    perception=perception,
+                )
+            log.info(
+                "conversation_reopened conversation_id=%s from_phase=%s intent=%s",
+                conversation_id,
+                state.phase,
+                perception.intent,
+            )
+            reopened_after_close = True
+            state.phase = ConversationPhase.NEGOTIATING
+            self._repo.save_state(conv, state)
+        else:
+            perception = run_perception(settings=self._settings, transcript=transcript, state=state, gig=gig)
 
         last_inbound_body: str | None = None
         for msg in reversed(messages):
@@ -161,6 +207,12 @@ class EmailAgentOrchestrator:
             )
 
         policy_overrides: list[str] = []
+        if reopened_after_close:
+            policy_overrides.append(
+                "The prospect is messaging again after we had closed the thread (declined or budget no-fit). "
+                "They appear to want another chance — acknowledge warmly without pressure, welcome the reopening, "
+                "and steer toward scheduling using AVAILABLE_STUB_SLOTS_ISO."
+            )
         if perception.is_hard_decline or perception.intent == ProspectIntent.DECLINING:
             policy_overrides.append(
                 "Prospect is declining or explicitly not interested. Close graciously without pressure."

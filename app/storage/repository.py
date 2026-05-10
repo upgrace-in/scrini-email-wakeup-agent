@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
@@ -110,6 +111,40 @@ class ConversationRepository:
     def save_state(self, conv: Conversation, state: ConversationState) -> None:
         conv.state_json = serialize_state(state)
         self._session.add(conv)
+
+    def booking_ledger_events_recent(self, *, limit: int = 100) -> list[dict]:
+        """Flatten `booking_history` across threads, newest `marked_at` first (persisted stub calendar)."""
+
+        stmt = select(Conversation)
+        conversations = list(self._session.scalars(stmt).all())
+        rows: list[dict] = []
+        for c in conversations:
+            st = parse_state(c.state_json)
+            for b in st.booking_history:
+                rows.append(
+                    {
+                        "conversation_id": c.id,
+                        "prospect_email": c.prospect_email,
+                        "subject": c.subject,
+                        "preset_key": c.preset_key,
+                        "conversation_phase": st.phase.value,
+                        "slot_iso": b.slot_iso,
+                        "booking_status": b.status,
+                        "marked_at": b.marked_at,
+                        "conversation_updated_at": c.updated_at.isoformat() if c.updated_at else "",
+                    }
+                )
+
+        def sort_key(r: dict) -> datetime:
+            raw = (r.get("marked_at") or "").strip()
+            try:
+                norm = raw.replace("Z", "+00:00")
+                return datetime.fromisoformat(norm)
+            except ValueError:
+                return datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+        rows.sort(key=sort_key, reverse=True)
+        return rows[: max(1, min(limit, 500))]
 
 
 def normalize_header_id(raw: str | None) -> str | None:

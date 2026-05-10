@@ -1,13 +1,17 @@
+# Default: Postgres only. Run the API on the host: `uvicorn app.main:app --reload --port 8000`
+# (set DATABASE_URL to 127.0.0.1 + published port below).
+#
+# Optional all-in-docker API (unusual):  docker compose --profile docker-api up --build -d
+
 services:
   api:
+    profiles: [docker-api]
     build: .
     ports:
       - "8000:8000"
     env_file:
-      # Loads RESEND_*, EMAIL_FROM, SANDBOX_*, etc. from repo `.env`.
       - .env
     environment:
-      # Overrides .env: app must use the compose Postgres service, not host SQLite paths.
       DATABASE_URL: postgresql+psycopg://wakeup:wakeup@db:5432/wakeup
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY}
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-6}
@@ -31,8 +35,9 @@ services:
       POSTGRES_PASSWORD: wakeup
       POSTGRES_DB: wakeup
     ports:
-      # Override if busy, e.g. WAKEUP_POSTGRES_PORT=5434 docker compose up -d db
-      - "${WAKEUP_POSTGRES_PORT:-5433}:5432"
+      # Localhost only — use from your terminal: psql/postgres clients on 127.0.0.1
+      # Override port if busy: WAKEUP_POSTGRES_PORT=5434 docker compose up -d
+      - "127.0.0.1:${WAKEUP_POSTGRES_PORT:-5433}:5432"
     volumes:
       # Dedicated volume for this compose project (avoid reusing other DBs).
       - scr_practice_wakeup_pg:/var/lib/postgresql/data
