@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.agent.openai_runner import safe_completion_json
+from app.agent.anthropic_runner import safe_completion_json
 from app.agent.prompts import PERCEPTION_SYSTEM
 from app.agent.schemas import PerceptionResult
 from app.config import GigConfig, Settings

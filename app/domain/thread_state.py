@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
 
@@ -10,7 +10,9 @@ from app.domain.enums import ConversationPhase
 class BookingRecord(BaseModel):
     slot_iso: str
     status: str = Field(description="'proposed', 'confirmed', 'cancelled'")
-    marked_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat(timespec="seconds") + "Z")
+    marked_at: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    )
 
 
 class NegotiationFacts(BaseModel):
@@ -20,6 +22,14 @@ class NegotiationFacts(BaseModel):
     last_offer_to_prospect_usd_hour: float | None = None
     last_quote_from_prospect_usd_hour: float | None = None
     objections_noted: list[str] = Field(default_factory=list)
+    pushback_rounds_above_ceiling: int = Field(
+        default=0,
+        description="How many turns the prospect has stayed above ceiling after we already engaged on price.",
+    )
+    offer_history_usd_hour: list[float] = Field(
+        default_factory=list,
+        description="Chronological list of numeric offers we've made to the prospect.",
+    )
 
 
 class ConversationState(BaseModel):

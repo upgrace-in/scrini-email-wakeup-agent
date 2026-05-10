@@ -12,7 +12,7 @@ from app.api.deps import db_session_dependency, orchestrator_factory
 from app.api.schemas import OutreachPayload, SimulatedInboundPayload
 from app.config import Settings, get_settings
 from app.domain.enums import MessageDirection
-from app.email.webhook_adapters import parse_generic
+from app.email.webhook_adapters import normalize_inbound_provider_payload
 from app.storage.repository import ConversationRepository, message_exists_by_provider_id, normalize_header_id
 
 log = logging.getLogger(__name__)
@@ -31,7 +31,6 @@ def healthz() -> HealthResponse:
 
 class OutreachResponse(BaseModel):
     conversation_id: str
-    mock_email: bool
 
 
 def get_settings_dep() -> Settings:
@@ -44,15 +43,24 @@ def start_outreach(
     session: Session = Depends(db_session_dependency),
     settings: Settings = Depends(get_settings_dep),
 ):
+    prospect = str(payload.prospect_email).strip()
+    if not settings.outbound_to_email_allowed(prospect):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "prospect_email is not in SANDBOX_ALLOWED_TO_EMAILS. "
+                "Update .env or use an allowed address."
+            ),
+        )
     orchestrator = orchestrator_factory(settings, ConversationRepository(session))
     conv, receipt, _outreach = orchestrator.initiate_outreach(
-        prospect_email=str(payload.prospect_email),
+        prospect_email=prospect,
         preset_key=payload.preset_key,
         idempotency_key=payload.idempotency_key,
         subject_hint=payload.subject_hint,
     )
     _ = _outreach
-    return OutreachResponse(conversation_id=conv.id, mock_email=receipt.mock)
+    return OutreachResponse(conversation_id=conv.id)
 
 
 class ConversationEnvelope(BaseModel):
@@ -125,7 +133,7 @@ def inbound_email_provider_webhook(
     if settings.webhook_secret and x_webhook_secret != settings.webhook_secret:
         raise HTTPException(status_code=403, detail="Invalid webhook authentication")
 
-    inbound = parse_generic(payload)
+    inbound = normalize_inbound_provider_payload(settings, payload)
     if inbound is None:
         raise HTTPException(status_code=400, detail="Could not normalize inbound payload")
 

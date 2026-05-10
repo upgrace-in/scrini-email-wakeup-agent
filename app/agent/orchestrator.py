@@ -3,9 +3,11 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from app.agent.negotiation import NegotiationMove, compute_negotiation_move
 from app.agent.outreach import OutreachEmail, compose_outreach
 from app.agent.perception import run_perception
 from app.agent.planner import run_planner
+from app.agent.rate_extract import merged_quoted_rates_usd_hour
 from app.agent.schemas import PerceptionResult, PlannerResult
 from app.calendar.stub import StubCalendar
 from app.config import GigConfig, Settings
@@ -73,7 +75,7 @@ class EmailAgentOrchestrator:
                 log.info("outreach idempotent hit conversation_id=%s", existing.id)
                 rec = SentEmailReceipt(
                     provider_message_id=last_out.provider_message_id if last_out else None,
-                    mock=True,
+                    http_status=200,
                 )
                 body = last_out.body_text if last_out else ""
                 subj = (last_out.subject if last_out and last_out.subject else None) or subject_hint
@@ -141,8 +143,19 @@ class EmailAgentOrchestrator:
         transcript = transcript_for_prompt(messages)
         perception = run_perception(settings=self._settings, transcript=transcript, state=state, gig=gig)
 
-        if perception.quoted_rates_usd_hour:
-            state.last_prospect_extracted_rates = sorted(set(perception.quoted_rates_usd_hour))
+        last_inbound_body: str | None = None
+        for msg in reversed(messages):
+            if msg.direction == MessageDirection.INBOUND.value:
+                last_inbound_body = msg.body_text
+                break
+
+        merged_rates = merged_quoted_rates_usd_hour(
+            perception_rates=perception.quoted_rates_usd_hour,
+            last_prospect_body=last_inbound_body,
+        )
+
+        if merged_rates:
+            state.last_prospect_extracted_rates = sorted(set(merged_rates))
             state.negotiation.last_quote_from_prospect_usd_hour = (
                 state.last_prospect_extracted_rates[-1] if state.last_prospect_extracted_rates else None
             )
@@ -159,10 +172,19 @@ class EmailAgentOrchestrator:
             )
             apply_cancellation_to_state(state)
 
-        if budget_impossible(gig, perception.quoted_rates_usd_hour):
-            policy_overrides.append(
-                "Their stated hourly expectations are firmly above ceiling with zero overlap — walk away politely."
-            )
+        move = compute_negotiation_move(
+            state=state,
+            gig=gig,
+            prospect_quotes_usd_hour=merged_rates,
+            intent=perception.intent,
+        )
+        log.info(
+            "negotiation_move conversation=%s posture=%s offer=%s walk_away=%s",
+            conversation_id,
+            move.posture,
+            move.recommended_offer_usd_hour,
+            move.should_walk_away,
+        )
 
         planner: PlannerResult | None = None
 
@@ -177,19 +199,12 @@ class EmailAgentOrchestrator:
                 planner_notes="hard_decline_short_circuit",
             )
             state.phase = ConversationPhase.CLOSED_DECLINED
-        elif budget_impossible(gig, perception.quoted_rates_usd_hour):
-            planner = PlannerResult(
-                reply_plaintext=(
-                    "Appreciate you sharing rate expectations plainly. Our approved envelope for this role tops out "
-                    f"below ${min(perception.quoted_rates_usd_hour):g}/hr you're targeting, so we won't waste your "
-                    "time negotiating into a mismatch. Thank you anyway — rooting for what's next on your side."
-                ),
-                internal_action="walk_away_budget",
-                planner_notes="deterministic_budget_walkaway",
-            )
-            state.phase = ConversationPhase.CLOSED_NO_FIT
         else:
             slots = list(self._settings.stub_slot_list())
+
+            def _planner_ov(base: list[str] | None) -> list[str] | None:
+                return base if base else None
+
             planner = run_planner(
                 settings=self._settings,
                 transcript=transcript,
@@ -197,8 +212,35 @@ class EmailAgentOrchestrator:
                 gig=gig,
                 perception=perception,
                 available_stub_slots=slots,
-                policy_overrides=policy_overrides or None,
+                policy_overrides=_planner_ov(policy_overrides),
+                negotiation_move=move,
             )
+            planner = _apply_negotiation_move_to_planner(planner, move, gig)
+            if planner.internal_action == "walk_away_budget" and not move.should_walk_away:
+                retry_ovs = [*policy_overrides]
+                retry_ovs.append(
+                    "CRITICAL: Your previous draft wrongly used internal_action walk_away_budget. "
+                    "NEGOTIATION_DIRECTIVE.should_walk_away is false for this turn. Output a non-walk-away "
+                    "action (reply_only or propose_times) and follow the directive posture exactly."
+                )
+                planner = run_planner(
+                    settings=self._settings,
+                    transcript=transcript,
+                    state=state,
+                    gig=gig,
+                    perception=perception,
+                    available_stub_slots=slots,
+                    policy_overrides=retry_ovs,
+                    negotiation_move=move,
+                )
+                planner = _apply_negotiation_move_to_planner(planner, move, gig)
+            if planner.negotiation_offer_usd_hour is not None:
+                state.negotiation.last_offer_to_prospect_usd_hour = planner.negotiation_offer_usd_hour
+                state.negotiation.offer_history_usd_hour = [
+                    *state.negotiation.offer_history_usd_hour,
+                    planner.negotiation_offer_usd_hour,
+                ]
+            state.negotiation.pushback_rounds_above_ceiling = move.next_pushback_rounds
             self._apply_booking_stub(state=state, planner=planner, conversation_id=str(conv.id))
 
         assert planner is not None
@@ -224,7 +266,9 @@ class EmailAgentOrchestrator:
             },
         )
 
-        if state.phase not in CLOSED:
+        if planner.internal_action == "walk_away_budget":
+            state.phase = ConversationPhase.CLOSED_NO_FIT
+        elif state.phase not in CLOSED:
             state.phase = derive_phase_after_turn(state)
 
         self._repo.save_state(conv, state)
@@ -255,6 +299,58 @@ class EmailAgentOrchestrator:
         state.booking_history = history
         state.awaiting_slot_choice = False
         self._calendar.log_stub_book(slot)
+
+
+def _clamp_planner_offer_to_ceiling(planner: PlannerResult, gig: GigConfig) -> PlannerResult:
+    ceiling = gig.budget_ceiling_usd_hour
+    offer = planner.negotiation_offer_usd_hour
+    if ceiling is None or offer is None:
+        return planner
+    if offer <= ceiling:
+        return planner
+    log.warning("planner offer %.2f above ceiling %.2f — clamping", offer, ceiling)
+    return planner.model_copy(
+        update={
+            "negotiation_offer_usd_hour": ceiling,
+            "planner_notes": (planner.planner_notes + " | offer_clamped_to_ceiling").strip(),
+        },
+    )
+
+
+def _apply_negotiation_move_to_planner(
+    planner: PlannerResult, move: NegotiationMove, gig: GigConfig
+) -> PlannerResult:
+    """Defense in depth: force the planner output to match the deterministic move.
+
+    LLMs are good at copy but bad at arithmetic. We only trust the model for prose; the
+    numeric offer and the walk-away decision are owned by `compute_negotiation_move`.
+    """
+    update: dict = {}
+    notes_extras: list[str] = []
+
+    if move.should_walk_away:
+        if planner.internal_action != "walk_away_budget":
+            notes_extras.append("forced_walk_away_budget")
+            update["internal_action"] = "walk_away_budget"
+        if planner.negotiation_offer_usd_hour is not None:
+            update["negotiation_offer_usd_hour"] = None
+            notes_extras.append("dropped_offer_on_walk_away")
+    elif move.recommended_offer_usd_hour is not None:
+        recommended = move.recommended_offer_usd_hour
+        current = planner.negotiation_offer_usd_hour
+        if current is None or abs(current - recommended) > 0.01:
+            update["negotiation_offer_usd_hour"] = recommended
+            notes_extras.append(f"offer_synced_to_directive_{recommended:g}")
+
+    if not update:
+        return _clamp_planner_offer_to_ceiling(planner, gig)
+
+    if notes_extras:
+        suffix = " | " + " ".join(notes_extras)
+        update["planner_notes"] = (planner.planner_notes + suffix).strip()
+
+    synced = planner.model_copy(update=update)
+    return _clamp_planner_offer_to_ceiling(synced, gig)
 
 
 def budget_impossible(gig: GigConfig, rates: list[float]) -> bool:

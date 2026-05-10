@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import json
-
 from pydantic import BaseModel, Field
 
+from app.agent.anthropic_runner import safe_completion_json
 from app.agent.prompts import OUTREACH_SYSTEM_TEMPLATE
 from app.config import GigConfig, Settings
-from openai import OpenAI
 
 
 class OutreachEmail(BaseModel):
@@ -21,27 +19,18 @@ def compose_outreach(*, settings: Settings, gig: GigConfig, prospect_email: str)
         if "@" in prospect_email
         else "there"
     )
-    client = OpenAI(api_key=settings.openai_api_key)
-    completion = client.chat.completions.create(
-        model=settings.openai_model,
-        temperature=0.7,
-        messages=[
-            {"role": "system", "content": system},
-            {
-                "role": "user",
-                "content": (
-                    "Prospect greeting name hint: "
-                    + user_payload
-                    + "\n Gig JSON:\n"
-                    + gig.model_dump_json()
-                    + '\nRespond JSON only matching {"subject": "...", "body": "..."}'
-                ),
-            },
-        ],
-        response_format={"type": "json_object"},
+    user = (
+        "Prospect greeting name hint: "
+        + user_payload
+        + "\nGig JSON:\n"
+        + gig.model_dump_json()
+        + '\nProduce subject and body; JSON shape matches OutreachEmail.'
     )
-    raw = completion.choices[0].message.content or "{}"
-    try:
-        return OutreachEmail.model_validate_json(raw)
-    except Exception:
-        return OutreachEmail.model_validate(json.loads(raw))
+    return safe_completion_json(
+        settings,
+        system=system,
+        user=user,
+        schema_cls=OutreachEmail,
+        temperature=0.7,
+        max_tokens=2048,
+    )

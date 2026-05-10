@@ -3,14 +3,20 @@ services:
     build: .
     ports:
       - "8000:8000"
+    env_file:
+      # Loads RESEND_*, EMAIL_FROM, SANDBOX_*, etc. from repo `.env`.
+      - .env
     environment:
+      # Overrides .env: app must use the compose Postgres service, not host SQLite paths.
       DATABASE_URL: postgresql+psycopg://wakeup:wakeup@db:5432/wakeup
-      OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY}
-      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
-      MOCK_EMAIL: ${MOCK_EMAIL:-true}
-      RESEND_API_KEY: ${RESEND_API_KEY:-}
-      EMAIL_FROM: ${EMAIL_FROM:-agent@example.com}
-      EMAIL_REPLY_DOMAIN: ${EMAIL_REPLY_DOMAIN:-example.com}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-6}
+      RESEND_API_KEY: ${RESEND_API_KEY:?set RESEND_API_KEY for outbound mail}
+      EMAIL_FROM: ${EMAIL_FROM:-Wakeup Agent <onboarding@resend.dev>}
+      EMAIL_REPLY_TO: ${EMAIL_REPLY_TO:-}
+      EMAIL_CC: ${EMAIL_CC:-}
+      EMAIL_MIRROR_REPLY_TO_IN_CC: ${EMAIL_MIRROR_REPLY_TO_IN_CC:-false}
+      SANDBOX_ALLOWED_TO_EMAILS: ${SANDBOX_ALLOWED_TO_EMAILS:-}
       ENVIRONMENT: development
       CALENDAR_MODE: stub
       STUB_AVAILABLE_SLOTS_ISO: "2026-05-12T14:00:00+00:00,2026-05-13T16:30:00+00:00,2026-05-14T10:00:00+00:00"
@@ -25,9 +31,11 @@ services:
       POSTGRES_PASSWORD: wakeup
       POSTGRES_DB: wakeup
     ports:
-      - "5433:5432"
+      # Override if busy, e.g. WAKEUP_POSTGRES_PORT=5434 docker compose up -d db
+      - "${WAKEUP_POSTGRES_PORT:-5433}:5432"
     volumes:
-      - wakeup_pg:/var/lib/postgresql/data
+      # Dedicated volume for this compose project (avoid reusing other DBs).
+      - scr_practice_wakeup_pg:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U wakeup -d wakeup"]
       interval: 3s
@@ -35,4 +43,4 @@ services:
       retries: 10
 
 volumes:
-  wakeup_pg:
+  scr_practice_wakeup_pg:
